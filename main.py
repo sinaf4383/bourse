@@ -66,11 +66,11 @@ class Tee:
         pass
 
 
-def job(mode):
+def job(mode, sym=""):
     old, tee = sys.stdout, Tee()
     sys.stdout = tee
     try:
-        core.run_mode(mode)
+        core.run_mode(mode, sym or None)
     except Exception:
         traceback.print_exc(file=tee)
     finally:
@@ -81,15 +81,15 @@ def job(mode):
             STATE["running"] = False
 
 
-def start_job(mode):
-    if mode not in ("1", "2", "3", "5"):
+def start_job(mode, sym=""):
+    if mode not in ("1", "2", "3", "5", "6"):
         return {"ok": False, "msg": "گزینه‌ی نامعتبر"}
     with LOCK:
         if STATE["running"]:
             return {"ok": False, "msg": "یک کار در حال اجراست؛ صبر کنید."}
         STATE["running"] = True
         del LINES[:]
-    threading.Thread(target=job, args=(mode,), daemon=True).start()
+    threading.Thread(target=job, args=(mode, sym.strip()), daemon=True).start()
     return {"ok": True}
 
 
@@ -148,8 +148,10 @@ border:1px solid #555;background:#222;color:#fff;margin:6px 0}
 <button id="b2" onclick="run('2')">پیشنهاد خرید</button>
 <button id="b5" onclick="run('5')">دیده‌بان بازار</button>
 <button id="b3" onclick="run('3')">بک‌تست</button>
+<button id="b6" style="grid-column:1/3" onclick="run('6')">بک‌تست سهم پیشنهادی</button>
 <button class="alt" style="grid-column:1/3" onclick="toggleStocks()">لیست سهام من</button>
 </div>
+<div style="padding:0 8px"><input id="symIn" placeholder="نماد برای بک‌تست (خالی = آخرین سهم پیشنهادی)"></div>
 <div class="box" id="stocksBox" style="display:none">
 <div id="stockList"></div>
 <input id="stockText" placeholder="نام سهم‌ها با فاصله؛ مثلاً: فولاد فملی شپنا">
@@ -165,12 +167,12 @@ border:1px solid #555;background:#222;color:#fff;margin:6px 0}
 <script>
 let pos=0;
 function $(i){return document.getElementById(i)}
-function busy(b){for(const i of ['b1','b2','b5','b3'])$(i).disabled=b}
+function busy(b){for(const i of ['b1','b2','b5','b3','b6'])$(i).disabled=b}
 function say(t){$('status').textContent=t}
 async function run(mode){
   busy(true);$('out').innerHTML='';pos=0;say('در حال اجرا ... برنامه را نبندید');
   $('stocksBox').style.display='none';
-  const r=await fetch('/api/run',{method:'POST',body:JSON.stringify({mode})});
+  const r=await fetch('/api/run',{method:'POST',body:JSON.stringify({mode,sym:(mode==='6'?$('symIn').value:'')})});
   const j=await r.json();
   if(!j.ok){say(j.msg);busy(false);return}
   poll();
@@ -289,7 +291,7 @@ class Handler(BaseHTTPRequestHandler):
             data = {}
         u = urlparse(self.path)
         if u.path == "/api/run":
-            return self._json(start_job(str(data.get("mode", ""))))
+            return self._json(start_job(str(data.get("mode", "")), str(data.get("sym", ""))))
         if u.path == "/api/stocks":
             return self._json(apply_stocks(str(data.get("text", ""))))
         self._json({}, 404)
