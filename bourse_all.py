@@ -2,12 +2,13 @@
 """
 بورس همه‌کاره - نسخه ۶ (میان‌مدت)
 
-منو (۵ گزینه):
+منو (۶ گزینه):
   ۱) تحلیل پورتفوی من: هر سهم جدا بررسی می‌شود و می‌گوید امروز چه کار کنید
   ۲) پیشنهاد سهم برای خرید (میان‌مدت، حدود ۲ ماه)
   ۳) بک‌تست میان‌مدت: آزمایش قاعده‌ها روی تاریخچه (هفته‌ای یک بار کافی است)
   ۴) ویرایش لیست سهام من (چند نماد را با فاصله بنویسید)
   ۵) دیده‌بان بازار: تحلیل هفته، پول حقیقی، گروه‌ها و هشدار داغی بازار
+  ۶) بک‌تست همین سهم پیشنهادی: آیا همین شرایط در گذشته‌ی خودِ این سهم جواب داده؟
 
 ثبت داده‌ی حقیقی/حقوقی و دفتر آزمون زنده خودکار انجام می‌شود (بعد از ۱۲:۴۵).
 فقط به requests نیاز دارد.
@@ -26,7 +27,7 @@ from datetime import datetime
 import requests
 
 # ======================= تنظیمات =======================
-MODE = "menu"              # "menu" یا مستقیم یک عدد از "1" تا "5"
+MODE = "menu"              # "menu" یا مستقیم یک عدد از "1" تا "6"
 
 # لیست سهام شما در فایل my_stocks.txt (کنار برنامه) ذخیره می‌شود (گزینه‌ی ۴).
 MY_STOCKS_FILE = "my_stocks.txt"
@@ -71,6 +72,7 @@ MAX_REQUESTS = 400         # حداکثر درخواست تاریخچه در ه�
 HISTORY_DAYS = 500
 CACHE_FILE = "bourse_cache.json"
 PICKS_LOG = "picks_log_mid.csv"   # دفتر آزمون زنده
+LAST_PICK_FILE = "last_pick.txt"  # آخرین سهم پیشنهادی (برای گزینه‌ی ۶)
 # =========================================================
 
 HOSTS = ["http://old.tsetmc.com", "https://old.tsetmc.com",
@@ -843,8 +845,132 @@ def run_pick(hist, market, clients, breadth, series):
     print("   ۱) کدال: مجمع/تقسیم سود نزدیک؟ افزایش سرمایه؟ گزارش ماهانه؟ توقف نماد؟")
     print("   ۲) صف خرید/فروش و حجم سفارش‌ها")
     print("   ۳) اخبار شرکت و صنعت این هفته")
+    save_last_pick(sym)
+    print("\n  برای بک‌تست همین سهم (آیا این شرایط در گذشته‌ی خودش جواب داده؟) گزینه‌ی ۶ را بزنید.")
     log_pick(latest, sym, price, len(flags))
     live_summary(market)
+
+
+# ======================= ۶) بک‌تست همین سهم =======================
+def save_last_pick(sym):
+    try:
+        with open(LAST_PICK_FILE, "w", encoding="utf-8") as f:
+            f.write(sym)
+    except Exception:
+        pass
+
+
+def read_last_pick():
+    try:
+        with open(LAST_PICK_FILE, encoding="utf-8") as f:
+            return fa(f.read().strip())
+    except Exception:
+        return ""
+
+
+def stock_trades(h, breadth, use_filter, step=1, min_gap=0):
+    """معامله‌های گذشته‌ی یک سهم با همان خروج پیشنهاد (حد ضرر شناور).
+    use_filter=True: فقط روزهایی که همه‌ی شرایط پیشنهاد برقرار بوده؛ وگرنه هر روز (مبنای مقایسه)."""
+    n = len(h)
+    pre = bad_prefix(h)
+    hold, mode, pct = LONG_EXIT
+    out, last_i = [], -10 ** 6
+    for i in range(60, n - 2, step):
+        if pre[min(n, i + hold + 2)] - pre[i - 60] > 0:
+            continue
+        if use_filter:
+            f = features_long(h, i)
+            if not f or not passes_long(f, LONG) or f["chg"] >= 2.7:
+                continue
+            b = breadth.get(h[i]["date"])
+            if REGIME_MIN_BREADTH and (b is None or b < REGIME_MIN_BREADTH):
+                continue
+            if i - last_i < min_gap:
+                continue
+        e, entry_p = i + 1, h[i + 1]["open"]
+        if entry_p >= h[i]["close"] * 1.028:
+            continue
+        o = outcome_long(h, e, entry_p, hold, mode, pct, allow_open=True)
+        if not o:
+            continue
+        out.append({"date": h[i]["date"], "entry": entry_p, "ret": o[0],
+                    "days": o[1], "done": o[2]})
+        last_i = i
+    return out
+
+
+def run_stock_backtest(hist, breadth, market, sym):
+    sym = fa(sym)
+    h = hist.get(sym)
+    if not h:
+        r = market.get(sym)
+        if not r:
+            print(f"{sym}: در بازار پیدا نشد.")
+            sug = difflib.get_close_matches(sym, list(market), n=3, cutoff=0.6)
+            if sug:
+                print("  شاید منظورتان این بود:", "، ".join(sug))
+            return
+        text = fetch_hist(r[0])
+        h = parse_history(text) if text else []
+    print(f"\n===== بک‌تست همین سهم: {sym} - {datetime.now():%Y-%m-%d %H:%M} =====")
+    if len(h) < 120:
+        print("تاریخچه‌ی این سهم کوتاه است (کمتر از ۱۲۰ روز)؛ بک‌تست قابل اتکا نیست.")
+        return
+    hold, mode, pct = LONG_EXIT
+    print(f"داده: {h[0]['date']} تا {h[-1]['date']} ({len(h)} روز معاملاتی)")
+    print(f"خروج: حد ضرر {'شناور' if mode == 'trail' else 'ثابت'} {pct:g}٪، حداکثر {hold} روز | کارمزد {COST_PCT}٪")
+
+    f = features_long(h, len(h) - 1)
+    b = breadth.get(h[-1]["date"])
+    if f:
+        print("\nامروز، شرایط پیشنهاد برای این سهم:")
+        rows = [
+            (f"ارزش معاملات ۲۰ روز ≥ {LONG['val']} م.ت", f["val"] >= LONG["val"], f"{f['val']:.0f}"),
+            ("قیمت بالای میانگین ۵۰ روزه و ۲۰ روزه بالای ۵۰ روزه", f["trend"] or not LONG["trend"],
+             "بله" if f["trend"] else "خیر"),
+            (f"بازده ۶۰ روز ≥ {LONG['r60']:g}٪", f["r60"] >= LONG["r60"], f"{f['r60']:+.0f}٪"),
+            (f"بازده ۲۰ روز ≤ {LONG['r20max']:g}٪", f["r20"] <= LONG["r20max"], f"{f['r20']:+.0f}٪"),
+            (f"بازار ≥ {REGIME_MIN_BREADTH:g}٪ بالای میانگین ۱۰ روزه",
+             b is not None and b >= REGIME_MIN_BREADTH, f"{b:.0f}٪" if b is not None else "نامشخص"),
+            ("امروز کمتر از ۲.۷٪ رشد (قابل خرید)", f["chg"] < 2.7, f"{f['chg']:+.1f}٪"),
+        ]
+        for label, ok, val in rows:
+            if not LONG["trend"] and "میانگین ۵۰ روزه" in label:
+                continue
+            print(f"  {'✅' if ok else '❌'} {label}: {val}")
+
+    sigs = stock_trades(h, breadth, True, 1, 10)
+    done = [x for x in sigs if x["done"]]
+    still = [x for x in sigs if not x["done"]]
+    print("\nدفعاتی که خودِ این سهم در گذشته همه‌ی این شرایط را داشت (حداقل ۱۰ روز فاصله):")
+    if not sigs:
+        print("  هیچ‌بار.")
+    for x in sigs:
+        state = f"{x['ret']:+.1f}٪ در {x['days']} روز" if x["done"] else f"هنوز باز: {x['ret']:+.1f}٪ تا الان"
+        print(f"  {x['date']} | ورود {x['entry']:.0f} | {state}")
+    st = stats_long([(x["ret"], x["days"]) for x in done])
+    print("\nجمع (فقط معامله‌های تمام‌شده):", fmt_long(st))
+
+    base = [x for x in stock_trades(h, breadth, False, 3) if x["done"]]
+    bst = stats_long([(x["ret"], x["days"]) for x in base])
+    print("مقایسه: خرید همین سهم در هر روز دیگر، بدون شرط:", fmt_long(bst))
+
+    print("\nنتیجه:")
+    if st is None or st["n"] < 5:
+        print(f"  ⚠ فقط {0 if st is None else st['n']} سیگنال تمام‌شده؛ برای نتیجه‌گیری کافی نیست.")
+    elif st["avg"] > 0 and st["wr"] >= 50 and bst and st["avg"] > bst["avg"]:
+        print("  ✅ در گذشته‌ی همین سهم، این شرایط بهتر از خرید در روزهای تصادفی جواب داده؛")
+        print("     ولی نمونه کم است و تضمین نمی‌کند.")
+    elif st["avg"] > 0:
+        print("  ⚠ این شرایط در گذشته‌ی این سهم سودده بوده، ولی بهتر از خرید در روزهای")
+        print("    تصادفی همین سهم نبوده.")
+    else:
+        print("  ❌ در گذشته‌ی این سهم، این شرایط سودده نبوده.")
+    if still:
+        print(f"  ({len(still)} سیگنال هنوز باز است و در جمع نیامده.)")
+    print("\nتوجه: یک سهم معمولاً چند سیگنال بیشتر در دو سال ندارد؛ این فقط یک چک اضافه است.")
+    print("بک‌تست کلی روی همه‌ی نمادها هم نشان داده این شرایط از «خرید هر سهم» بهتر نبوده.")
+    print("اطلاعات حقیقی/حقوقی و خبر در این بک‌تست نیست (تاریخچه‌اش را نداریم).")
 
 
 # ======================= ۵) دیده‌بان بازار =======================
@@ -1330,7 +1456,7 @@ def manage_stocks():
 
 
 # ======================= منو =======================
-def run_mode(mode):
+def run_mode(mode, arg=None):
     if mode == "4":
         if not manage_stocks():
             return
@@ -1364,6 +1490,13 @@ def run_mode(mode):
     if pending:
         print(f"⚠ {pending} نماد هنوز بررسی نشده؛ نتیجه کامل نیست. دوباره اجرا کنید تا ادامه یابد.")
     series = market_series(hist_core)
+    if mode == "6":
+        sym = fa(arg) if arg else read_last_pick()
+        if not sym:
+            print("هنوز سهمی پیشنهاد نشده. اول گزینه‌ی ۲ را بزنید یا نام یک نماد را بنویسید.")
+            return
+        run_stock_backtest(hist, breadth, market, sym)
+        return
     if mode == "2":
         run_pick(hist, market, clients, breadth, series)
     elif mode == "3":
@@ -1384,6 +1517,7 @@ def main():
         print("۳) بک‌تست میان‌مدت")
         print("۴) ویرایش لیست سهام من")
         print("۵) دیده‌بان بازار (تحلیل هفته)")
+        print("۶) بک‌تست همین سهم پیشنهادی")
         print("۰) خروج از برنامه")
         try:
             choice = input("عدد را وارد کنید: ").strip().translate(_NUM)
@@ -1392,11 +1526,18 @@ def main():
         if choice == "0":
             print("پایان.")
             break
-        if choice not in ("1", "2", "3", "4", "5"):
+        if choice not in ("1", "2", "3", "4", "5", "6"):
             print("گزینه‌ی نامعتبر.")
             continue
+        arg = None
+        if choice == "6":
+            last = read_last_pick()
+            try:
+                arg = input(f"نام نماد (فقط Enter = آخرین سهم پیشنهادی{': ' + last if last else ''}): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                arg = ""
         try:
-            run_mode(choice)
+            run_mode(choice, arg or None)
         except KeyboardInterrupt:
             print("\nمتوقف شد.")
         except Exception:
